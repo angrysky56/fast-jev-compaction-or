@@ -1,10 +1,10 @@
 """OpenRouter-backed Jev context engine for Hermes Agent.
 
-Install this directory as ``plugins/context_engine/fast_jev_compaction`` in a
-Hermes checkout, set ``context.engine: fast_jev_compaction``, and provide
-``OPENROUTER_API_KEY``.  The engine owns only the compaction pass and returns
-the original messages unchanged whenever Jev, OpenRouter, or transcript
-normalization is not trustworthy.
+Install this directory as ``~/.hermes/plugins/fast-jev-compaction``, set
+``context.engine: fast_jev_compaction``, and provide ``OPENROUTER_API_KEY``.
+The engine owns only the compaction pass and returns the original messages
+unchanged whenever Jev, OpenRouter, or transcript normalization is not
+trustworthy.
 """
 
 from __future__ import annotations
@@ -27,6 +27,15 @@ DEFAULT_PROTECTED_TOOLS = frozenset({"edit", "write", "notebookedit", "apply_pat
 STATE_CHAR_BUDGET = 84_000
 RESULT_PREVIEW_CHARS = 160
 TRUNCATE_HEAD_CHARS = 300
+
+
+def _openrouter_api_key() -> str:
+    """Read the active Hermes profile's key without crossing profile boundaries."""
+    try:
+        from agent.secret_scope import get_secret_str
+    except ImportError:
+        return os.getenv("OPENROUTER_API_KEY", "").strip()
+    return get_secret_str("OPENROUTER_API_KEY", "").strip()
 
 
 def _as_text(value: Any) -> str:
@@ -94,6 +103,25 @@ class FastJevCompactionEngine(ContextEngine):
         self.compression_count = 0
         self._lock = threading.Lock()
 
+    def __deepcopy__(self, memo: Dict[int, Any]) -> "FastJevCompactionEngine":
+        """Create an agent-local engine without copying its non-copyable lock.
+
+        Hermes clones plugin engines when it creates child agents. Each clone
+        must retain the observed usage and limits, but needs an independent
+        lock so concurrent agent contexts cannot block one another.
+        """
+        clone = type(self)(self.context_length)
+        memo[id(self)] = clone
+        clone.threshold_percent = self.threshold_percent
+        clone.threshold_tokens = self.threshold_tokens
+        clone.last_prompt_tokens = self.last_prompt_tokens
+        clone.last_completion_tokens = self.last_completion_tokens
+        clone.last_total_tokens = self.last_total_tokens
+        clone.compression_count = self.compression_count
+        clone.protect_first_n = self.protect_first_n
+        clone.protect_last_n = self.protect_last_n
+        return clone
+
     @property
     def name(self) -> str:
         return "fast_jev_compaction"
@@ -124,7 +152,7 @@ class FastJevCompactionEngine(ContextEngine):
     ) -> List[Dict[str, Any]]:
         """Return a compacted valid OpenAI message list, or the exact input on any uncertainty."""
         original = copy.deepcopy(messages)
-        if not os.getenv("OPENROUTER_API_KEY"):
+        if not _openrouter_api_key():
             return original
         if not force and not self.should_compress(current_tokens):
             return original
@@ -260,6 +288,9 @@ class FastJevCompactionEngine(ContextEngine):
             yield candidates[start : start + 20]
 
     def _ask(self, state: Dict[str, Any], batch: List[_Pair]) -> Dict[str, float]:
+        api_key = _openrouter_api_key()
+        if not api_key:
+            raise ValueError("OPENROUTER_API_KEY is not configured")
         questions: Dict[str, Dict[str, str]] = {}
         for pair in batch:
             questions[f"call_{pair.call_id}"] = {
@@ -315,7 +346,7 @@ class FastJevCompactionEngine(ContextEngine):
             OPENROUTER_URL,
             data=_json(body).encode("utf-8"),
             headers={
-                "Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             method="POST",
@@ -396,4 +427,9 @@ class FastJevCompactionEngine(ContextEngine):
         )
 
 
-__all__ = ["FastJevCompactionEngine"]
+def register(ctx: Any) -> None:
+    """Register the one Hermes context engine exposed by this plugin."""
+    ctx.register_context_engine(FastJevCompactionEngine())
+
+
+__all__ = ["FastJevCompactionEngine", "register"]

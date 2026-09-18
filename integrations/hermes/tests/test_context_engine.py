@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import os
 import sys
@@ -26,10 +27,11 @@ def load_engine():
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    return module.FastJevCompactionEngine
+    return module
 
 
-Engine = load_engine()
+ENGINE_MODULE = load_engine()
+Engine = ENGINE_MODULE.FastJevCompactionEngine
 
 
 def read_pair(call_id: str, name: str = "Read"):
@@ -80,6 +82,20 @@ class ContextEngineTests(unittest.TestCase):
             f"{kind}_{pair.call_id}": 0.0 for pair in batch for kind in ("call", "result")
         }
         self.assertEqual(engine.compress(messages, force=True), messages)
+
+    def test_register_and_deepcopy_match_the_hermes_plugin_contract(self):
+        class PluginContext:
+            engine = None
+
+            def register_context_engine(self, engine):
+                self.engine = engine
+
+        context = PluginContext()
+        ENGINE_MODULE.register(context)
+        self.assertIsInstance(context.engine, Engine)
+        clone = copy.deepcopy(context.engine)
+        self.assertIsInstance(clone, Engine)
+        self.assertIsNot(clone._lock, context.engine._lock)
 
 
 if __name__ == "__main__":

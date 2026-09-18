@@ -1,3 +1,5 @@
 name: fast_jev_compaction
 version: 0.4.0
 description: Conservative OpenRouter Jev context engine that retains useful tool evidence.
+requires_env:
+  - OPENROUTER_API_KEY
