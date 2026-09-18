@@ -1,20 +1,26 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.3.0",
-  "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
+  "version": "0.4.0",
+  "description": "OpenRouter-backed Jev-guided compaction for compatible Claude Code sessions.",
   "license": "MIT",
   "userConfig": {
     "apiKey": {
       "type": "string",
-      "title": "TypeSafe API key",
-      "description": "TypeSafe API key. Leave unset to use TYPESAFE_API_KEY.",
+      "title": "OpenRouter API key",
+      "description": "OpenRouter API key. Leave unset to use OPENROUTER_API_KEY.",
       "sensitive": true
     },
-    "keepThreshold": {
+    "keepCallThreshold": {
       "type": "number",
-      "title": "Keep threshold",
-      "description": "Minimum Jev probability that a tool call or tool result is still needed; below it the item is removed.",
+      "title": "Keep-call threshold",
+      "description": "Minimum Jev probability for retaining a tool-call record.",
       "default": 0.5
+    },
+    "keepResultThreshold": {
+      "type": "number",
+      "title": "Keep-result threshold",
+      "description": "Minimum Jev probability for retaining the full tool result.",
+      "default": 0.25
     },
     "preserveRecentMessages": {
       "type": "number",
@@ -52,11 +58,35 @@
       "description": "Characters of a tool result kept when Jev decides its full output is no longer needed; 0 keeps only the note.",
       "default": 300
     },
+    "resultPreviewChars": {
+      "type": "number",
+      "title": "Result preview size",
+      "description": "Characters kept from each end of a result in Jev's classifier state.",
+      "default": 160
+    },
+    "maxConcurrentRequests": {
+      "type": "number",
+      "title": "Concurrent Jev requests",
+      "description": "Maximum simultaneous requests made by one compaction.",
+      "default": 4
+    },
+    "timeoutMs": {
+      "type": "number",
+      "title": "Request timeout",
+      "description": "Milliseconds before a stalled Jev request falls back to native compaction.",
+      "default": 15000
+    },
+    "provider": {
+      "type": "string",
+      "title": "Jev provider",
+      "description": "Use openrouter by default. Set typesafe only for a private TypeSafe API key.",
+      "default": "openrouter"
+    },
     "model": {
       "type": "string",
       "title": "Jev model",
-      "description": "TypeSafe Jev model name.",
-      "default": "jev-latest"
+      "description": "OpenRouter Jev model ID.",
+      "default": "~typesafe/jev-latest"
     }
   }
 }

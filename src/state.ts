@@ -3,13 +3,15 @@ import type {
   FittedState,
   HistoryEntry,
   Message,
+  PendingToolCall,
   ResolvedCompactOptions,
   ToolCall,
   ToolResult,
+  ToolUse,
 } from './types.js';
 
 export const STATE_CONTEXT =
-  'A coding assistant conversation is being compacted to free context. `history` is the whole conversation so far, oldest first; tool outputs are replaced by a short `result` note and long texts may be abridged. Each question asks whether one tool call, or the full output of that call, still needs to stay in the history verbatim. Whatever is not kept is deleted permanently, but the assistant can always re-run a tool or re-read a file.';
+  'A coding assistant conversation is being compacted to free context. `history` is oldest first; long text and tool output previews may be abridged. Each question asks whether a tool call or its complete result should remain available for the current task. Preserve information whose loss could repeat work, hide a constraint, erase a change, or lose a point-in-time fact.';
 
 /** Successive caps on the serialised tool input included per call. */
 const INPUT_CHARS = [1000, 200, 60] as const;
@@ -62,33 +64,53 @@ export function isPinned(
 export function collectToolCalls(
   messages: readonly Message[],
   preserveRecentMessages: number,
+  protection: Pick<ResolvedCompactOptions, 'neverDeleteTools' | 'protectErrors'> = {
+    neverDeleteTools: [],
+    protectErrors: true,
+  },
 ): ToolCall[] {
-  const results = new Map<string, { index: number; result: ToolResult }>();
+  const callsById = new Map<string, { index: number; tool: ToolUse }>();
+  const resultsById = new Map<string, { index: number; result: ToolResult }>();
   messages.forEach((message, index) => {
+    for (const tool of message.toolUses) {
+      if (callsById.has(tool.tool_use_id)) {
+        throw new Error(`Ambiguous transcript: duplicate tool call ${tool.tool_use_id}`);
+      }
+      if (resultsById.has(tool.tool_use_id)) {
+        throw new Error(`Ambiguous transcript: result precedes tool call ${tool.tool_use_id}`);
+      }
+      callsById.set(tool.tool_use_id, { index, tool });
+    }
     for (const result of message.toolResults ?? []) {
-      results.set(result.tool_use_id, { index, result });
+      if (resultsById.has(result.tool_use_id)) {
+        throw new Error(`Ambiguous transcript: duplicate tool result ${result.tool_use_id}`);
+      }
+      resultsById.set(result.tool_use_id, { index, result });
     }
   });
+  const protectedTools = new Set(protection.neverDeleteTools.map((tool) => tool.toLowerCase()));
   const calls: ToolCall[] = [];
-  messages.forEach((message, callIndex) => {
-    for (const tool of message.toolUses) {
-      const found = results.get(tool.tool_use_id);
+  for (const [toolUseId, { index: callIndex, tool }] of callsById) {
+      const found = resultsById.get(toolUseId);
       if (!found) continue;
       calls.push({
         id: `t${calls.length + 1}`,
-        tool_use_id: tool.tool_use_id,
+        tool_use_id: toolUseId,
         tool: tool.tool,
         input: tool.input,
         callIndex,
         resultIndex: found.index,
         resultChars: found.result.text.length,
         isError: found.result.isError ?? false,
+        resultText: found.result.text,
         pinned:
           isPinned(callIndex, messages.length, preserveRecentMessages) ||
           isPinned(found.index, messages.length, preserveRecentMessages),
+        protected:
+          protectedTools.has(tool.tool.toLowerCase()) ||
+          (protection.protectErrors && (found.result.isError ?? false)),
       });
-    }
-  });
+  }
   return calls;
 }
 
@@ -102,8 +124,10 @@ function inputText(input: Record<string, unknown>, limit: number): string {
   return truncate(json, limit);
 }
 
-function resultNote(call: ToolCall): string {
-  return `${call.isError ? 'error' : 'ok'}, ${call.resultChars} chars (omitted)`;
+function resultNote(call: ToolCall, previewChars: number): string {
+  const text = call.resultText ?? '';
+  const preview = abridge(text, previewChars, previewChars);
+  return `${call.isError ? 'error' : 'ok'}, ${call.resultChars} chars; preview=${JSON.stringify(preview)}`;
 }
 
 /** One call as a single line, for when the structured form is too costly. */
@@ -128,7 +152,10 @@ function mergeCallRuns(history: readonly HistoryEntry[], pinned: (e: HistoryEntr
   for (const entry of history) {
     const previous = merged[merged.length - 1];
     const foldable = (e: HistoryEntry): boolean =>
-      !pinned(e) && e.text.length === 0 && typeof e.tool_calls?.[0] === 'string';
+      !pinned(e) &&
+      e.text.length === 0 &&
+      !e.pending_calls &&
+      typeof e.tool_calls?.[0] === 'string';
     if (previous && foldable(previous) && foldable(entry) && previous.role === entry.role) {
       previous.tool_calls = [...(previous.tool_calls as string[]), ...(entry.tool_calls as string[])];
       continue;
@@ -152,19 +179,25 @@ function historyEntries(
   messages: readonly Message[],
   calls: readonly ToolCall[],
   inputChars: number,
+  resultPreviewChars: number,
 ): HistoryEntry[] {
   const byMessage = callsByMessage(calls);
+  const paired = new Set(calls.map((call) => call.tool_use_id));
   const entries: HistoryEntry[] = [];
   messages.forEach((message, i) => {
     const toolCalls = (byMessage.get(i) ?? []).map((call) => ({
       id: call.id,
       tool: call.tool,
       input: inputText(call.input, inputChars),
-      result: resultNote(call),
+      result: resultNote(call, resultPreviewChars),
     }));
-    if (message.text.trim().length === 0 && toolCalls.length === 0) return;
+    const pendingCalls: PendingToolCall[] = message.toolUses
+      .filter((tool) => !paired.has(tool.tool_use_id))
+      .map((tool) => ({ tool: tool.tool, input: inputText(tool.input, inputChars) }));
+    if (message.text.trim().length === 0 && toolCalls.length === 0 && pendingCalls.length === 0) return;
     const entry: HistoryEntry = { i, role: message.role, text: message.text };
     if (toolCalls.length > 0) entry.tool_calls = toolCalls;
+    if (pendingCalls.length > 0) entry.pending_calls = pendingCalls;
     entries.push(entry);
   });
   return entries;
@@ -195,7 +228,10 @@ export function goalFromMessages(messages: readonly Message[]): string {
 export function fitState(
   messages: readonly Message[],
   calls: readonly ToolCall[],
-  options: Pick<ResolvedCompactOptions, 'maxStateTokens' | 'preserveRecentMessages' | 'goal'>,
+  options: Pick<
+    ResolvedCompactOptions,
+    'maxStateTokens' | 'preserveRecentMessages' | 'goal' | 'resultPreviewChars'
+  >,
 ): FittedState {
   const goal = options.goal || goalFromMessages(messages);
   const stateOf = (history: HistoryEntry[]): CompactionState => ({
@@ -215,7 +251,7 @@ export function fitState(
   let perEntry: number[] = [];
   let tokens = 0;
   const rebuild = (inputChars: number): void => {
-    history = historyEntries(messages, calls, inputChars);
+    history = historyEntries(messages, calls, inputChars, options.resultPreviewChars ?? 160);
     perEntry = history.map(entryTokens);
     tokens = baseTokens + perEntry.reduce((sum, n) => sum + n, 0);
   };
@@ -278,7 +314,7 @@ export function fitState(
   const left = new Set<number>();
   for (const index of order) {
     const entry = history[index]!;
-    if (pinned(entry) || entry.tool_calls) continue;
+    if (pinned(entry) || entry.tool_calls || entry.pending_calls) continue;
     left.add(index);
     tokens -= perEntry[index] ?? 0;
     if (fits()) {

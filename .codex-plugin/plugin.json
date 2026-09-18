@@ -1,0 +1,25 @@
+{
+  "name": "fast-jev-compaction",
+  "version": "0.4.0",
+  "description": "OpenRouter-backed Jev context compaction for coding agents.",
+  "author": {
+    "name": "Ty",
+    "url": "https://github.com/angrysky56"
+  },
+  "homepage": "https://github.com/angrysky56/fast-jev-compaction-or",
+  "repository": "https://github.com/angrysky56/fast-jev-compaction-or",
+  "license": "MIT",
+  "keywords": ["jev", "openrouter", "context", "compaction", "codex"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Fast Jev Compaction",
+    "shortDescription": "Preserve useful agent evidence with Jev.",
+    "longDescription": "A Codex skill and companion library for conservative, OpenRouter-backed selection of useful tool evidence.",
+    "developerName": "Ty",
+    "category": "Productivity",
+    "capabilities": ["Agent guidance"],
+    "defaultPrompt": [
+      "Use Jev compaction to retain the tool evidence needed for this task."
+    ]
+  }
+}

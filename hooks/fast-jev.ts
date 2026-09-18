@@ -9,7 +9,13 @@ import type {
 } from 'claude-code';
 
 import { compact, reductionRatio, resolveOptions } from '../src/compact.js';
-import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.js';
+import {
+  buildJevRequest,
+  DEFAULT_MODEL,
+  parseJevResponse,
+  parseOpenRouterResponse,
+  type JevProvider,
+} from '../src/request.js';
 import type {
   CompactOptions,
   CompactResult,
@@ -23,6 +29,7 @@ const HOOK_DEFAULTS = {
   compactAtPercent: 60,
   minReductionRatio: 0.25,
   model: DEFAULT_MODEL,
+  timeoutMs: 15_000,
 };
 
 export type HookFetchInit = {
@@ -42,9 +49,11 @@ export type HookFetch = (url: string, init?: HookFetchInit) => Promise<HookFetch
 
 export type HookConfig = CompactOptions & {
   apiKey?: string;
+  provider: JevProvider;
   compactAtPercent: number;
   minReductionRatio: number;
   model: string;
+  timeoutMs: number;
 };
 
 function optionNumber(options: PluginOptions, key: string, fallback: number): number {
@@ -62,10 +71,14 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   const numbers: Partial<Omit<CompactOptions, 'goal'>> = {};
   for (const key of [
     'keepThreshold',
+    'keepCallThreshold',
+    'keepResultThreshold',
     'preserveRecentMessages',
     'maxStateTokens',
     'maxRequestTokens',
     'truncateHeadChars',
+    'resultPreviewChars',
+    'maxConcurrentRequests',
   ] as const) {
     const value = options[key];
     if (typeof value === 'number' && Number.isFinite(value)) numbers[key] = value;
@@ -79,6 +92,8 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
       HOOK_DEFAULTS.minReductionRatio,
     ),
     model: optionString(options, 'model') ?? HOOK_DEFAULTS.model,
+    provider: optionString(options, 'provider') === 'typesafe' ? 'typesafe' : 'openrouter',
+    timeoutMs: Math.max(1, optionNumber(options, 'timeoutMs', HOOK_DEFAULTS.timeoutMs)),
   };
   const apiKey = optionString(options, 'apiKey');
   if (apiKey) config.apiKey = apiKey;
@@ -88,16 +103,23 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
 }
 
 /** A `JevAsker` over the engine's `$.http.fetch`. */
-export function jevAsker(fetchFn: HookFetch, apiKey: string, model: string): JevAsker {
+export function jevAsker(
+  fetchFn: HookFetch,
+  apiKey: string,
+  model: string,
+  provider: JevProvider = 'openrouter',
+): JevAsker {
   return {
     async ask(state, questions) {
-      const request = buildJevRequest({ apiKey, model }, state, questions);
+      const request = buildJevRequest({ apiKey, model, provider }, state, questions);
       const response = await fetchFn(request.url, {
         method: request.method,
         headers: request.headers,
         body: request.body,
       });
-      return parseJevResponse(response.status, response.ok, response.text);
+      return provider === 'typesafe'
+        ? parseJevResponse(response.status, response.ok, response.text)
+        : parseOpenRouterResponse(response.status, response.ok, response.text);
     },
   };
 }
@@ -166,9 +188,21 @@ export async function compactSession(
   messages: readonly SessionMessage[],
   config: HookConfig,
   fetchFn: HookFetch,
+  instructions: string = '',
 ): Promise<SessionCompaction> {
-  if (!config.apiKey) throw new Error('TYPESAFE_API_KEY is not configured');
-  const result = await compact(messages, jevAsker(fetchFn, config.apiKey, config.model), config);
+  if (!config.apiKey) {
+    throw new Error(
+      config.provider === 'typesafe'
+        ? 'TYPESAFE_API_KEY is not configured'
+        : 'OPENROUTER_API_KEY is not configured',
+    );
+  }
+  const goal = [config.goal, instructions.trim()].filter(Boolean).join('\n\n');
+  const result = await compact(
+    messages,
+    jevAsker(fetchFn, config.apiKey, config.model, config.provider),
+    { ...config, goal },
+  );
   return { result, messages: toSessionMessages(messages, result.messages) };
 }
 
@@ -183,6 +217,7 @@ export function summarize(result: CompactResult): string {
     stats.resultsDropped > 0 ? `${stats.resultsDropped} results truncated` : '',
     stats.callsDropped > 0 ? `${stats.callsDropped} call_dropped` : '',
     stats.pinned > 0 ? `${stats.pinned} pinned` : '',
+    stats.protected > 0 ? `${stats.protected} protected` : '',
   ].filter(Boolean);
   return `${percent(reductionRatio(result))} reduction; ${
     parts.join(', ') || 'no tool calls'
@@ -232,12 +267,13 @@ async function getApiKey(
   config: HookConfig,
 ): Promise<string | undefined> {
   if (config.apiKey) return config.apiKey;
-  const fromEnv = await $.env.get('TYPESAFE_API_KEY');
+  const name = config.provider === 'typesafe' ? 'TYPESAFE_API_KEY' : 'OPENROUTER_API_KEY';
+  const fromEnv = await $.env.get(name);
   if (fromEnv) return fromEnv;
   const settings = await $.settings.read();
   const env = settings['env'];
   if (env && typeof env === 'object') {
-    const value = (env as Record<string, unknown>)['TYPESAFE_API_KEY'];
+    const value = (env as Record<string, unknown>)[name];
     if (typeof value === 'string' && value) return value;
   }
   return undefined;
@@ -252,8 +288,27 @@ function notify(
   },
   text: string,
 ): void {
-  $.ui.log(text);
-  $.ui.toast(text, { timeoutMs: 15_000 });
+  try {
+    $.ui.log(text);
+  } catch {
+    // Diagnostics must never prevent the native compaction fallback.
+  }
+  try {
+    $.ui.toast(text, { timeoutMs: 15_000 });
+  } catch {
+    // Diagnostics must never replace a successful compaction result.
+  }
+}
+
+function log(
+  $: { ui: { log: (text: string) => void } },
+  text: string,
+): void {
+  try {
+    $.ui.log(text);
+  } catch {
+    // The host UI is non-essential to transcript safety.
+  }
 }
 
 export const register: Register = (on: On, options: PluginOptions) => {
@@ -263,11 +318,20 @@ export const register: Register = (on: On, options: PluginOptions) => {
   on('session.compact', async ($, event, next) => {
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
+      const instructions =
+        typeof (event as { instructions?: unknown }).instructions === 'string'
+          ? (event as { instructions: string }).instructions
+          : '';
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
-        const response = await $.http.fetch(url, init);
+        const response = await Promise.race([
+          $.http.fetch(url, init),
+          $.clock.sleep(config.timeoutMs).then(() => {
+            throw new Error(`Jev request timed out after ${config.timeoutMs}ms`);
+          }),
+        ]);
         return { status: response.status, ok: response.ok, text: response.text };
-      });
-      for (const line of decisionLogLines(result)) $.ui.log(line);
+      }, instructions);
+      for (const line of decisionLogLines(result)) log($, line);
       if (reductionRatio(result) < config.minReductionRatio) {
         notify(
           $,
@@ -291,13 +355,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
     if (compacting) return next(event);
+    compacting = true;
     try {
       const { context } = await $.session.usage();
       if ((context.percent ?? 0) < configured.compactAtPercent) return next(event);
-      compacting = true;
       await $.session.compact();
     } catch (error) {
-      $.ui.log(
+      log(
+        $,
         `auto-compact skipped (${error instanceof Error ? error.message : String(error)})`,
       );
     } finally {

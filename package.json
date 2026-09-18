@@ -1,7 +1,7 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.2.0",
-  "description": "Continuous, verbatim context compaction for LLM agents using TypeSafe's Jev model.",
+  "version": "0.4.0",
+  "description": "Fail-open context compaction for Codex and Hermes using Jev through OpenRouter.",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -16,12 +16,18 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    ".codex-plugin",
+    "skills",
+    "integrations/hermes/context_engine/fast_jev_compaction/__init__.py",
+    "integrations/hermes/context_engine/fast_jev_compaction/plugin.yaml",
+    "hooks"
   ],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit && npm run typecheck:hooks",
-    "test": "vitest run",
+    "test": "vitest run tests/fast-jev-compaction.test.ts tests/hook.test.ts",
+    "prepack": "npm run build",
     "demo": "tsx examples/demo.ts",
     "typecheck:hooks": "tsc -p tsconfig.hooks.json",
     "validate:plugin": "claude plugin validate .claude-plugin/plugin.json"
@@ -30,6 +36,6 @@
     "@types/node": "^22.10.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^4.1.11"
   }
 }

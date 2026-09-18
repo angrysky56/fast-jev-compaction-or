@@ -43,8 +43,12 @@ export interface ToolCall {
   resultIndex: number;
   resultChars: number;
   isError: boolean;
+  /** Original output, retained only while building the classifier state. */
+  resultText?: string;
   /** In the first or the newest preserved messages; never a candidate. */
   pinned: boolean;
+  /** Protected by policy; never sent to Jev or changed by compaction. */
+  protected?: boolean;
 }
 
 export interface CallAnswer {
@@ -60,7 +64,7 @@ export interface CallDecision extends CallAnswer {
   id: string;
   tool: string;
   action: CallAction;
-  reason: 'pinned' | 'kept' | 'result_dropped' | 'call_dropped';
+  reason: 'pinned' | 'protected' | 'kept' | 'result_dropped' | 'call_dropped';
 }
 
 export interface HistoryToolCall {
@@ -70,12 +74,20 @@ export interface HistoryToolCall {
   result: string;
 }
 
+/** A tool call that has not received a result yet. It is context, never a deletion candidate. */
+export interface PendingToolCall {
+  tool: string;
+  input: string;
+}
+
 export interface HistoryEntry {
   i: number;
   role: Role;
   text: string;
   /** Structured per call, or one compact line per call once the state has to shrink. */
   tool_calls?: HistoryToolCall[] | string[];
+  /** Calls still awaiting a result; retained in classifier state at every fitting stage. */
+  pending_calls?: PendingToolCall[];
 }
 
 /** The state sent with every Jev request: the whole history, results omitted. */
@@ -95,8 +107,12 @@ export interface FittedState {
 export interface CompactOptions {
   /** Ongoing task description; defaults to the last few user prompts. */
   goal?: string;
-  /** Minimum keep probability for a call or result to stay. Default 0.5. */
+  /** Legacy threshold for both decisions. Prefer the separate thresholds below. */
   keepThreshold?: number;
+  /** Minimum probability for retaining a tool call. Default 0.5. */
+  keepCallThreshold?: number;
+  /** Minimum probability for retaining a complete result. Default 0.25. */
+  keepResultThreshold?: number;
   /** Newest messages never touched (the first message is always kept). Default 6. */
   preserveRecentMessages?: number;
   /** Estimated token ceiling for the state. Default 25000. */
@@ -105,15 +121,31 @@ export interface CompactOptions {
   maxRequestTokens?: number;
   /** Characters of a dropped tool result to retain. Default 300. */
   truncateHeadChars?: number;
+  /** Characters from each end of a result supplied to Jev for scoring. Default 160. */
+  resultPreviewChars?: number;
+  /** Tool names whose calls and results must never be modified. */
+  neverDeleteTools?: readonly string[];
+  /** Keep failed tool calls and results regardless of the model score. Default true. */
+  protectErrors?: boolean;
+  /** Fail instead of deleting every scored pair. Hooks then use their native fallback. Default true. */
+  failOnAllCandidatesDropped?: boolean;
+  /** Maximum simultaneous Jev requests within one compaction. Default 4. */
+  maxConcurrentRequests?: number;
 }
 
 export interface ResolvedCompactOptions {
   goal: string;
-  keepThreshold: number;
+  keepCallThreshold: number;
+  keepResultThreshold: number;
   preserveRecentMessages: number;
   maxStateTokens: number;
   maxRequestTokens: number;
   truncateHeadChars: number;
+  resultPreviewChars: number;
+  neverDeleteTools: readonly string[];
+  protectErrors: boolean;
+  failOnAllCandidatesDropped: boolean;
+  maxConcurrentRequests: number;
 }
 
 export interface CompactResult {
@@ -130,6 +162,7 @@ export interface CompactResult {
     resultsDropped: number;
     callsDropped: number;
     pinned: number;
+    protected: number;
     stateTokens: number;
     /** Which fitting stage the state needed, '' when no request was made. */
     stateStage: string;
